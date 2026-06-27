@@ -46,6 +46,7 @@ build/.cmake/
 *.zsync
 appimage-build
 AppDir
+build-app/
 # Direnv
 .direnv/
 # Nix
