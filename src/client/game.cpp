@@ -473,6 +473,50 @@ bool Game::startup(volatile std::sig_atomic_t *kill,
 }
 
 
+// WARPTEST-CAPTURE-BEGIN (installed by warptest.luanti_runtime.ensure_luanti_instrumentation)
+// Deterministic, config-gated screenshot capture for the WarpTest visual oracle.
+// Mirrors OpenRA's Launch.WarptestScreenshotPath/Frame/ExitAfterScreenshot harness:
+// after `warptest_screenshot_frame` rendered frames it writes the framebuffer to
+// `warptest_screenshot_path` (reusing the same IVideoDriver::createScreenShot path
+// as Client::makeScreenshot/takeScreenshot) and optionally requests shutdown.
+static void warptest_maybe_capture(video::IVideoDriver *driver)
+{
+	static int warptest_frame = 0;
+	static bool warptest_done = false;
+	if (warptest_done || !driver || !g_settings->exists("warptest_screenshot_path"))
+		return;
+	const std::string warptest_path = g_settings->get("warptest_screenshot_path");
+	if (warptest_path.empty())
+		return;
+	const int target_frame = g_settings->exists("warptest_screenshot_frame")
+			? g_settings->getS32("warptest_screenshot_frame") : 120;
+	if (++warptest_frame < (target_frame > 0 ? target_frame : 1))
+		return;
+	warptest_done = true;
+
+	video::IImage *raw_image = driver->createScreenShot();
+	if (raw_image) {
+		video::IImage *image = driver->createImage(video::ECF_R8G8B8, raw_image->getDimension());
+		if (image) {
+			raw_image->copyTo(image);
+			if (driver->writeImageToFile(image, warptest_path.c_str(), 85))
+				infostream << "[warptest] captured screenshot to " << warptest_path << std::endl;
+			else
+				errorstream << "[warptest] failed to write screenshot to " << warptest_path << std::endl;
+			image->drop();
+		}
+		raw_image->drop();
+	} else {
+		errorstream << "[warptest] createScreenShot returned null" << std::endl;
+	}
+
+	const bool exit_after = g_settings->exists("warptest_exit_after_screenshot")
+			&& g_settings->getBool("warptest_exit_after_screenshot");
+	if (exit_after && g_gamecallback)
+		g_gamecallback->shutdown_requested = true;
+}
+// WARPTEST-CAPTURE-END
+
 void Game::run()
 {
 	ZoneScoped;
@@ -594,6 +638,9 @@ void Game::run()
 		processPlayerInteraction(dtime, m_game_ui->m_flags.show_hud);
 		updateFrame(&graph, &stats, dtime, cam_view);
 		updateProfilerGraphs(&graph);
+		// WARPTEST-CALL-BEGIN (installed by warptest.luanti_runtime.ensure_luanti_instrumentation)
+		warptest_maybe_capture(driver);
+		// WARPTEST-CALL-END
 
 		if (m_does_lost_focus_pause_game && !device->isWindowFocused() && !isMenuActive()) {
 			m_game_formspec.showPauseMenu();
