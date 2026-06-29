@@ -525,13 +525,15 @@ static void warptest_maybe_capture(video::IVideoDriver *driver)
 		if (token.empty() || out_path.empty() || token == warptest_last_token)
 			return;
 		const bool ok = warptest_write_screenshot(driver, out_path);
+		if (!ok)
+			return;  // leave token unconsumed so a later frame can retry this request
 		warptest_last_token = token;
 		const std::string done_path = g_settings->exists("warptest_screenshot_done_path")
 				? g_settings->get("warptest_screenshot_done_path") : "";
 		if (!done_path.empty()) {
 			std::ofstream done(done_path.c_str(), std::ios::trunc);
 			if (done.good()) {
-				done << token << (ok ? " ok" : " fail") << std::endl;
+				done << token << " ok" << std::endl;
 				done.close();
 			}
 		}
