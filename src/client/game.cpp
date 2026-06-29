@@ -474,16 +474,74 @@ bool Game::startup(volatile std::sig_atomic_t *kill,
 
 
 // WARPTEST-CAPTURE-BEGIN (installed by warptest.luanti_runtime.ensure_luanti_instrumentation)
-// Deterministic, config-gated screenshot capture for the WarpTest visual oracle.
-// Mirrors OpenRA's Launch.WarptestScreenshotPath/Frame/ExitAfterScreenshot harness:
-// after `warptest_screenshot_frame` rendered frames it writes the framebuffer to
-// `warptest_screenshot_path` (reusing the same IVideoDriver::createScreenShot path
-// as Client::makeScreenshot/takeScreenshot) and optionally requests shutdown.
+// Config-gated screenshot capture for the WarpTest visual oracle. Two modes:
+//   * One-shot (legacy): after `warptest_screenshot_frame` rendered frames, write the
+//     framebuffer to `warptest_screenshot_path` and optionally request shutdown.
+//   * Persistent on-demand (warm session): when `warptest_screenshot_request_path`
+//     is set, poll that file each frame. Its first line is an opaque token and its
+//     second line a target path; when the token changes, capture the current frame to
+//     the path, write the token to `warptest_screenshot_done_path`, and keep running.
+// Both reuse the same IVideoDriver::createScreenShot path as Client::makeScreenshot.
+#include <fstream>
+static bool warptest_write_screenshot(video::IVideoDriver *driver, const std::string &out_path)
+{
+	video::IImage *raw_image = driver->createScreenShot();
+	if (!raw_image) {
+		errorstream << "[warptest] createScreenShot returned null" << std::endl;
+		return false;
+	}
+	bool ok = false;
+	video::IImage *image = driver->createImage(video::ECF_R8G8B8, raw_image->getDimension());
+	if (image) {
+		raw_image->copyTo(image);
+		ok = driver->writeImageToFile(image, out_path.c_str(), 85);
+		if (ok)
+			infostream << "[warptest] captured screenshot to " << out_path << std::endl;
+		else
+			errorstream << "[warptest] failed to write screenshot to " << out_path << std::endl;
+		image->drop();
+	}
+	raw_image->drop();
+	return ok;
+}
 static void warptest_maybe_capture(video::IVideoDriver *driver)
 {
+	if (!driver)
+		return;
+
+	// Persistent on-demand capture for the warm StateSession.
+	if (g_settings->exists("warptest_screenshot_request_path")) {
+		static std::string warptest_last_token;
+		const std::string req_path = g_settings->get("warptest_screenshot_request_path");
+		if (req_path.empty())
+			return;
+		std::ifstream req(req_path.c_str());
+		if (!req.good())
+			return;
+		std::string token, out_path;
+		std::getline(req, token);
+		std::getline(req, out_path);
+		req.close();
+		if (token.empty() || out_path.empty() || token == warptest_last_token)
+			return;
+		const bool ok = warptest_write_screenshot(driver, out_path);
+		warptest_last_token = token;
+		const std::string done_path = g_settings->exists("warptest_screenshot_done_path")
+				? g_settings->get("warptest_screenshot_done_path") : "";
+		if (!done_path.empty()) {
+			std::ofstream done(done_path.c_str(), std::ios::trunc);
+			if (done.good()) {
+				done << token << (ok ? " ok" : " fail") << std::endl;
+				done.close();
+			}
+		}
+		return;
+	}
+
+	// One-shot frame-based capture (legacy).
 	static int warptest_frame = 0;
 	static bool warptest_done = false;
-	if (warptest_done || !driver || !g_settings->exists("warptest_screenshot_path"))
+	if (warptest_done || !g_settings->exists("warptest_screenshot_path"))
 		return;
 	const std::string warptest_path = g_settings->get("warptest_screenshot_path");
 	if (warptest_path.empty())
@@ -493,22 +551,7 @@ static void warptest_maybe_capture(video::IVideoDriver *driver)
 	if (++warptest_frame < (target_frame > 0 ? target_frame : 1))
 		return;
 	warptest_done = true;
-
-	video::IImage *raw_image = driver->createScreenShot();
-	if (raw_image) {
-		video::IImage *image = driver->createImage(video::ECF_R8G8B8, raw_image->getDimension());
-		if (image) {
-			raw_image->copyTo(image);
-			if (driver->writeImageToFile(image, warptest_path.c_str(), 85))
-				infostream << "[warptest] captured screenshot to " << warptest_path << std::endl;
-			else
-				errorstream << "[warptest] failed to write screenshot to " << warptest_path << std::endl;
-			image->drop();
-		}
-		raw_image->drop();
-	} else {
-		errorstream << "[warptest] createScreenShot returned null" << std::endl;
-	}
+	warptest_write_screenshot(driver, warptest_path);
 
 	const bool exit_after = g_settings->exists("warptest_exit_after_screenshot")
 			&& g_settings->getBool("warptest_exit_after_screenshot");
